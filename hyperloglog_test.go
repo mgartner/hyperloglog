@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	rand2 "math/rand/v2"
 	"reflect"
 	"slices"
 	"testing"
@@ -584,7 +585,9 @@ func genData(num int) [][]byte {
 	buf := make([]byte, numBytes)
 
 	// generate random bytes
-	n, err := crand.Read(buf)
+	seed := [32]byte([]byte("xxxxxxxx benchmark seed xxxxxxxx"))
+	rng := rand2.NewChaCha8(seed)
+	n, err := rng.Read(buf)
 	if err != nil {
 		panic(err)
 	} else if n != numBytes {
