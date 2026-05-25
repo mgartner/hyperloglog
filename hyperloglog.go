@@ -145,7 +145,21 @@ func (sk *Sketch) toNormal() {
 }
 
 func (sk *Sketch) insert(i uint32, r uint8) { sk.regs[i] = max(r, sk.regs[i]) }
-func (sk *Sketch) Insert(e []byte)          { sk.InsertHash(hash(e)) }
+
+func (sk *Sketch) Insert(e []byte) {
+	x := hash(e)
+	// NB: The following code is identical to InsertHash. Manually inlining it
+	// provides a non-negligible performance improvement when the Go compiler is
+	// not convinced to automatically inline it.
+	if sk.sparse() {
+		if sk.tmpSet.add(encodeHash(x, sk.p, pp)) {
+			sk.maybeToNormal()
+		}
+		return
+	}
+	i, r := getPosVal(x, sk.p)
+	sk.insert(uint32(i), r)
+}
 
 func (sk *Sketch) InsertHash(x uint64) {
 	if sk.sparse() {
