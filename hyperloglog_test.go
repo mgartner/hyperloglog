@@ -900,3 +900,71 @@ func Benchmark_MarshalBinary(b *testing.B) {
 		}
 	}
 }
+
+func Benchmark_Marcus(b *testing.B) {
+	b.Run("NewSketch", func(b *testing.B) {
+		for b.Loop() {
+			sk, _ := NewSketch(10, false)
+			sk.InsertHash(1)
+			_ = sk.Estimate()
+		}
+	})
+	b.Run("InitDenseSketch", func(b *testing.B) {
+		for b.Loop() {
+			var sk Sketch
+			var regs [1 << 10]uint8
+			_ = sk.InitDenseSketch(10, regs[:])
+			sk.InsertHash(1)
+			_ = sk.Estimate()
+		}
+	})
+	b.Run("Sketch10Dense", func(b *testing.B) {
+		for b.Loop() {
+			var sk Sketch10Dense
+			sk.Init()
+			sk.InsertHash(1)
+			_ = sk.Estimate()
+		}
+	})
+	b.Run("DenseSketch10", func(b *testing.B) {
+		for b.Loop() {
+			var sk DenseSketch10
+			sk.InsertHash(1)
+			_ = sk.Estimate()
+		}
+	})
+}
+
+func Benchmark_Marcus2(b *testing.B) {
+	nums := make([]uint64, 10_000)
+	for i := range nums {
+		nums[i] = uint64(rand.Int63())
+	}
+	b.Run("NewSketch", func(b *testing.B) {
+		for b.Loop() {
+			sk, _ := NewSketch(10, false)
+			for _, num := range nums {
+				sk.InsertHash(num)
+			}
+			_ = sk.Estimate()
+		}
+	})
+	b.Run("DenseSketch10", func(b *testing.B) {
+		for b.Loop() {
+			var sk DenseSketch10
+			for _, num := range nums {
+				sk.InsertHash(num)
+			}
+			_ = sk.Estimate()
+		}
+	})
+	b.Run("DenseSketch10_2", func(b *testing.B) {
+		for b.Loop() {
+			var sk DenseSketch10
+			for _, num := range nums {
+				sk.InsertHash2(num)
+			}
+			_ = sk.Estimate()
+		}
+	})
+}

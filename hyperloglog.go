@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/bits"
 	"slices"
 )
 
@@ -60,6 +61,34 @@ func NewSketch(precision uint8, sparse bool) (*Sketch, error) {
 		s.regs = make([]uint8, m)
 	}
 	return s, nil
+}
+
+func (sk *Sketch) InitDenseSketch(precision uint8, registers []uint8) error {
+	if precision < 4 || precision > 18 {
+		return fmt.Errorf("precision must be >= 4 and <= 18")
+	}
+	m := uint32(1) << precision
+	if len(registers) != int(m) {
+		return fmt.Errorf("expected %d registers", m)
+	}
+	sk.m = m
+	sk.p = precision
+	sk.alpha = alpha(float64(m))
+	sk.regs = registers
+	return nil
+}
+
+type Sketch10Dense struct {
+	Sketch
+	regs [1 << 10]uint8
+}
+
+func (sk *Sketch10Dense) Init() {
+	const precision = 10
+	sk.m = uint32(1) << precision
+	sk.p = precision
+	sk.alpha = alpha(precision)
+	sk.Sketch.regs = sk.regs[:]
 }
 
 func (sk *Sketch) sparse() bool { return sk.sparseList != nil }
@@ -147,6 +176,7 @@ func (sk *Sketch) toNormal() {
 func (sk *Sketch) insert(i uint32, r uint8) { sk.regs[i] = max(r, sk.regs[i]) }
 func (sk *Sketch) Insert(e []byte)          { sk.InsertHash(hash(e)) }
 
+//go:noinline
 func (sk *Sketch) InsertHash(x uint64) {
 	if sk.sparse() {
 		if sk.tmpSet.add(encodeHash(x, sk.p, pp)) {
@@ -158,6 +188,7 @@ func (sk *Sketch) InsertHash(x uint64) {
 	sk.insert(uint32(i), r)
 }
 
+//go:noinline
 func (sk *Sketch) Estimate() uint64 {
 	if sk.sparse() {
 		sk.mergeSparse()
@@ -352,3 +383,104 @@ func (sk *Sketch) unmarshalBinaryV2(data []byte) error {
 	sk.regs = data[8:]
 	return nil
 }
+
+type Registers struct {
+}
+
+const (
+	denseM10     = uint32(1) << 10
+	denseAlpha10 = 0.7213 / (1 + 1.079/float64(denseM10))
+)
+
+type DenseSketch10 struct {
+	regs [denseM10]uint8
+}
+
+//go:noinline
+func (sk *DenseSketch10) InsertHash(x uint64) {
+	i, r := getPosVal10(x)
+	sk.regs[i] = max(r, sk.regs[i])
+}
+
+//go:noinline
+func (sk *DenseSketch10) InsertHash2(x uint64) {
+	// 1. Force the index to be strictly bounded within [0, 1023] at the type level
+	// This helps the compiler eliminate any hidden invariant checks on fixed arrays.
+	i := (x >> 54) & 1023
+
+	// 2. Original highly optimized sentinel bit logic
+	w := x<<10 | 1<<9
+	rho := uint8(bits.LeadingZeros64(w)) + 1
+
+	// 3. Localize the array lookup to break data dependency stalls
+	// On M1 (ARM64), this compiles beautifully into an atomic LDR -> CSEL -> STR loop
+	current := sk.regs[i]
+	if rho > current {
+		sk.regs[i] = rho
+	}
+}
+
+func getPosVal10(x uint64) (uint64, uint8) {
+	i := bextr10(x)        // {x63,...,x64-p}
+	w := x<<10 | 1<<(10-1) // {x63-p,...,x0}
+	rho := uint8(bits.LeadingZeros64(w)) + 1
+	return i, rho
+}
+
+func bextr10(v uint64) uint64 {
+	return (v >> (64 - 10)) & ((1 << 10) - 1)
+}
+
+//go:noinline
+func (sk *DenseSketch10) Estimate() uint64 {
+	sum, ez := sk.sumAndZeros()
+	m := float64(denseM10)
+	alpha := denseAlpha10
+	est := alpha * m * (m - ez) / (sum + beta10(ez))
+	return uint64(est + 0.5)
+}
+
+// Precompute the values once globally.
+// pow2Inverse[b] stores 1.0 / (2^b) for all b in [0, 255].
+// TODO: This is an easy change to make upstrem without any
+// API change required.
+var pow2Inverse = func() [256]float64 {
+	var table [256]float64
+	for i := range table {
+		table[i] = 1.0 / math.Pow(2.0, float64(i))
+	}
+	return table
+}()
+
+func (sk *DenseSketch10) sumAndZeros() (res, ez float64) {
+	// for i := 0; i < len(sk.regs); i += 8 {
+	// res0 := 1.0 / math.Pow(2.0, float64(sk.regs[i]))
+	// res1 := 1.0 / math.Pow(2.0, float64(sk.regs[i+1]))
+	// res2 := 1.0 / math.Pow(2.0, float64(sk.regs[i+2]))
+	// res3 := 1.0 / math.Pow(2.0, float64(sk.regs[i+3]))
+	// res4 := 1.0 / math.Pow(2.0, float64(sk.regs[i+4]))
+	// res5 := 1.0 / math.Pow(2.0, float64(sk.regs[i+5]))
+	// res6 := 1.0 / math.Pow(2.0, float64(sk.regs[i+6]))
+	// res7 := 1.0 / math.Pow(2.0, float64(sk.regs[i+7]))
+	// res += res0 + res1 + res2 + res3 + res4 + res5 + res6 + res7
+	// }
+	// return res, float64(bytes.Count(sk.regs[:], []byte{0}))
+	for _, v := range sk.regs {
+		if v == 0 {
+			ez++
+		}
+		res += pow2Inverse[v]
+	}
+	return res, ez
+}
+
+// type sketch interface {
+// 	p() uint8
+// }
+
+// TODO: Maybe we can have a generic insert function? We
+// should measure if it is fast enough.
+// func InsertHash[T sketch](sk T, x uint64) {
+// 	i, r := getPosVal(x, sk.p())
+// 	sk.insert(uint32(i), r)
+// }
